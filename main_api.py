@@ -18,18 +18,17 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 MODELS_DIR = "models"
 PREDICTION_STEPS = 5
 
-app = FastAPI(title="Crypto Neuro API", version="Final-Extended")
+app = FastAPI(title="Crypto Neuro API", version="Final-TimeFix")
 loaded_models_cache = {}
 
 
 class UserRequest(BaseModel):
     symbol: str = "BTCUSDT"
     interval: str = "5m"
-    training_period: str = "1y"  # 3m, 6m, 1y, 2y
+    training_period: str = "1y"
 
 
 def get_interval_ms(interval_str):
-    # Обновили карту времени
     map_time = {
         "1m": 60000,
         "5m": 300000,
@@ -45,12 +44,11 @@ def get_interval_ms(interval_str):
 
 
 def fetch_fresh_data(symbol, interval, limit_total):
-    """Качает свежие данные"""
     limit_per_req = 1000
     all_data = []
     current_end_time = int(time.time() * 1000)
 
-    print(f"[Binance] Скачивание {limit_total} свечей для прогноза...")
+    print(f"[Binance] Скачивание {limit_total} свечей...")
 
     while len(all_data) < limit_total:
         remaining = limit_total - len(all_data)
@@ -147,13 +145,11 @@ def predict_crypto(req: UserRequest):
     if model is None:
         raise HTTPException(
             status_code=404,
-            detail=f"Модель {req.symbol} {req.interval} {req.training_period} не найдена. Обучите её.",
+            detail=f"Модель {req.symbol} {req.interval} {req.training_period} не найдена.",
         )
 
-    # 2. Определяем lookback из файла модели
     lookback = model.input_shape[1]
 
-    # 3. Считаем данные
     interval_ms = get_interval_ms(req.interval)
     two_weeks_ms = 14 * 24 * 60 * 60 * 1000
     candles_for_2weeks = int(two_weeks_ms / interval_ms)
@@ -161,7 +157,7 @@ def predict_crypto(req: UserRequest):
     min_needed_for_ai = lookback + 20
     fetch_limit = max(candles_for_2weeks, min_needed_for_ai)
 
-    # 4. Качаем
+    # 4. Скачивание
     df = fetch_fresh_data(req.symbol, req.interval, fetch_limit)
     if df.empty or len(df) < lookback:
         raise HTTPException(status_code=502, detail="Недостаточно данных с Binance")
@@ -182,23 +178,29 @@ def predict_crypto(req: UserRequest):
         predicted_prices.append(val)
         current_batch = np.append(current_batch[:, 1:, :], [[[val]]], axis=1)
 
-    # Превращаем в Python список (ВАЖНО для JSON)
     result_prices = (
         scaler.inverse_transform(np.array(predicted_prices).reshape(-1, 1))
         .flatten()
         .tolist()
     )
 
-    # 6. Ответ
+    # --- ИСПРАВЛЕНИЕ ВРЕМЕНИ (UTC+3) ---
     detailed_preds = []
+
+    # Создаем таймзону UTC+3 (Москва)
+    tz_offset = datetime.timezone(datetime.timedelta(hours=3))
+
     for i, price in enumerate(result_prices):
         future_ms = last_time + ((i + 1) * interval_ms)
-        t_str = datetime.datetime.fromtimestamp(future_ms / 1000).strftime("%H:%M")
+
+        # Конвертируем timestamp с учетом таймзоны
+        dt_object = datetime.datetime.fromtimestamp(future_ms / 1000, tz=tz_offset)
+        t_str = dt_object.strftime("%H:%M")
+
         detailed_preds.append({"step": i + 1, "time": t_str, "price": float(price)})
 
     trend = "UP" if result_prices[-1] > current_price else "DOWN"
 
-    # Отдаем ровно 2 недели истории
     history_to_return = dataset
     if len(history_to_return) > candles_for_2weeks:
         history_to_return = history_to_return[-candles_for_2weeks:]
